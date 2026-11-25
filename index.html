@@ -39,6 +39,11 @@
   .bar > i { display:block; height:100%; background:#ff6b5a; border-radius:3px; transition:width .3s; }
   .opt.top .bar > i { background:var(--green); }
   .names { margin-top:6px; font-size:12px; color:var(--sub); line-height:1.5; word-break:break-word; }
+  .names .full { display:none; }
+  .names.can { padding:4px 0; margin-top:2px; cursor:pointer; }
+  .names.open .short { display:none; }
+  .names.open .full { display:block; }
+  .names .more { color:var(--green); font-style:normal; margin-left:6px; white-space:nowrap; }
   footer { position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid var(--line);
            padding:10px 14px calc(10px + env(safe-area-inset-bottom)); display:flex; gap:10px; }
   footer button { flex:1; height:48px; border:none; border-radius:10px; font-size:16px; font-weight:700; }
@@ -80,7 +85,10 @@ const LIFF_ID = '2012799270-MhFkZQEi';
 const API_URL = 'https://script.google.com/macros/s/AKfycbzvA3wXn387xrkANfc5dnmCip066ypP7_xHkeelwqtxKs9qnCF2T4iU8gcl_s6yYLRlvw/exec';
 // ================================
 
-const state = { idToken:null, pollId:null, data:null, selected:new Set(), dirty:false, busy:false };
+const NAME_LEN = 8;     // 收合時每個名字最多幾個字
+const NAMES_LEN = 16;   // 收合時整串名字最多幾個字
+
+const state = { idToken:null, pollId:null, data:null, selected:new Set(), open:new Set(), dirty:false, busy:false };
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -113,6 +121,21 @@ async function api(payload) {
   return d;
 }
 
+function cut(s, len) {
+  const c = [...s];
+  return c.length > len ? c.slice(0, len).join('') + '…' : s;
+}
+
+/** 只看字數：每個名字先限制字數，整串再限制字數；有被縮短才收合，點一下看全部全名 */
+function namesHtml(o) {
+  const full = o.names.join('、');
+  const short = cut(o.names.map(n => cut(n, NAME_LEN)).join('、'), NAMES_LEN);
+  if (short === full) return '<div class="names">' + esc(full) + '</div>';
+  return '<div class="names can' + (state.open.has(o.id) ? ' open' : '') + '">' +
+    '<div class="short">' + esc(short) + '<i class="more">共 ' + o.names.length + ' 人 ▾</i></div>' +
+    '<div class="full">' + esc(full) + '<i class="more">收起 ▴</i></div></div>';
+}
+
 function render(d, keepSelection) {
   state.data = d;
   const p = d.poll;
@@ -135,7 +158,7 @@ function render(d, keepSelection) {
   list.innerHTML = d.options.map(o => {
     const sel = state.selected.has(o.id);
     const pct = max ? Math.round(o.count / max * 100) : 0;
-    const names = p.showNames && o.names.length ? '<div class="names">' + o.names.map(esc).join('、') + '</div>' : '';
+    const names = p.showNames && o.names.length ? namesHtml(o) : '';
     return '<div class="opt' + (sel ? ' sel' : '') + (p.closed ? ' disabled' : '') +
       (max && o.count === max ? ' top' : '') + '" data-id="' + esc(o.id) + '">' +
       '<div class="mark"></div><div class="info"><div class="row">' +
@@ -160,7 +183,12 @@ function updateSubmit() {
 
 $('list').addEventListener('click', e => {
   const el = e.target.closest('.opt');
-  if (!el || !state.data || state.data.poll.closed) return;
+  const box = e.target.closest('.names.can');
+  if (box) {   // 點名字只展開或收起，不影響投票
+    box.classList.toggle('open') ? state.open.add(el.dataset.id) : state.open.delete(el.dataset.id);
+    return;
+  }
+  if (!el ||!state.data || state.data.poll.closed) return;
   const id = el.dataset.id;
   if (state.data.poll.multi) {
     state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
