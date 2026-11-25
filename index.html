@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>投票</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  :root { --green:#06C755; --text:#222; --sub:#888; --line:#eee; --bg:#f6f7f9; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+         color:var(--text); background:var(--bg); padding-bottom:96px; }
+  header { background:#fff; padding:20px 18px 16px; border-bottom:1px solid var(--line); }
+  .tag { color:var(--green); font-weight:700; font-size:13px; }
+  h1 { font-size:20px; margin:6px 0 4px; line-height:1.4; }
+  #desc { margin:4px 0; color:#555; font-size:14px; white-space:pre-wrap; }
+  #meta { margin:6px 0 0; color:var(--sub); font-size:12px; }
+  #closedBanner { display:none; margin-top:10px; padding:8px 10px; border-radius:8px;
+                  background:#fff3f0; color:#e5533d; font-size:13px; font-weight:600; }
+  .tools { display:flex; justify-content:space-between; align-items:center;
+           padding:10px 18px 4px; font-size:13px; color:var(--sub); }
+  .tools button { background:none; border:none; color:var(--green); font-size:13px; padding:4px; }
+  main { padding:4px 12px; }
+  .opt { background:#fff; border-radius:12px; padding:12px 14px; margin:8px 0;
+         display:flex; gap:12px; align-items:flex-start; border:2px solid transparent; }
+  .opt.sel { border-color:var(--green); }
+  .opt.disabled { opacity:.85; }
+  .mark { flex:none; width:24px; height:24px; border-radius:50%; border:2px solid #ccc; margin-top:1px;
+          display:flex; align-items:center; justify-content:center; color:#fff; font-size:14px; }
+  .single .mark { border-radius:50%; }
+  .multi .mark { border-radius:6px; }
+  .opt.sel .mark { background:var(--green); border-color:var(--green); }
+  .opt.sel .mark::after { content:"✓"; }
+  .info { flex:1; min-width:0; }
+  .row { display:flex; justify-content:space-between; gap:8px; }
+  .label { font-size:16px; font-weight:600; word-break:break-word; }
+  .count { flex:none; font-size:15px; color:#555; font-weight:600; }
+  .bar { height:6px; background:#f0f0f0; border-radius:3px; margin-top:8px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:#ff6b5a; border-radius:3px; transition:width .3s; }
+  .opt.top .bar > i { background:var(--green); }
+  .names { margin-top:6px; font-size:12px; color:var(--sub); line-height:1.5; word-break:break-word; }
+  footer { position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid var(--line);
+           padding:10px 14px calc(10px + env(safe-area-inset-bottom)); display:flex; gap:10px; }
+  footer button { flex:1; height:48px; border:none; border-radius:10px; font-size:16px; font-weight:700; }
+  #submit { background:var(--green); color:#fff; }
+  #submit:disabled { background:#b9e8cb; }
+  #close { flex:0 0 88px; background:#eef0f3; color:#555; }
+  #toast { position:fixed; left:50%; bottom:90px; transform:translateX(-50%); background:rgba(0,0,0,.8);
+           color:#fff; padding:10px 18px; border-radius:20px; font-size:14px; opacity:0;
+           transition:opacity .25s; pointer-events:none; white-space:nowrap; }
+  #toast.show { opacity:1; }
+  .msg { text-align:center; color:var(--sub); padding:60px 20px; line-height:1.7; }
+</style>
+</head>
+<body>
+<header>
+  <div class="tag">🗳️ 投票</div>
+  <h1 id="title">載入中…</h1>
+  <p id="desc"></p>
+  <p id="meta"></p>
+  <div id="closedBanner">投票已結束，只能查看結果</div>
+</header>
+<div class="tools" id="tools" style="display:none">
+  <span id="voters"></span>
+  <span>
+    <button id="btnClear" type="button">清除選擇</button>
+    <button id="btnRefresh" type="button">重新整理</button>
+  </span>
+</div>
+<main id="list"></main>
+<footer>
+  <button id="close" type="button">關閉</button>
+  <button id="submit" type="button" disabled>送出</button>
+</footer>
+<div id="toast"></div>
+
+<script>
+// ====== 請改成你自己的設定 ======
+const LIFF_ID = '2012799270-MhFkZQEi';
+const API_URL = '請填入Apps Script網頁應用程式網址';
+// ================================
+
+const state = { idToken:null, pollId:null, data:null, selected:new Set(), dirty:false, busy:false };
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+}
+function showError(msg) {
+  $('title').textContent = '無法開啟投票';
+  $('list').innerHTML = '<div class="msg">' + esc(msg) + '</div>';
+  $('submit').disabled = true;
+}
+
+function getPollId() {
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('poll')) return qs.get('poll');
+  const st = qs.get('liff.state');           // 第一次跳轉時參數會包在 liff.state 裡
+  if (st) return new URLSearchParams(st.replace(/^[^?]*\?/, '')).get('poll');
+  return null;
+}
+
+async function api(payload) {
+  // 不設定 Content-Type，避免 CORS 預檢（Apps Script 不支援 OPTIONS）
+  const res = await fetch(API_URL, {
+    method:'POST',
+    body: JSON.stringify(Object.assign({ idToken: state.idToken, pollId: state.pollId }, payload)),
+  });
+  const d = await res.json();
+  if (!d.ok) throw new Error(d.error || '發生錯誤');
+  return d;
+}
+
+function render(d, keepSelection) {
+  state.data = d;
+  const p = d.poll;
+  document.title = p.title;
+  $('title').textContent = p.title;
+  $('desc').textContent = p.desc || '';
+  $('meta').textContent = [p.multi ? '可複選' : '單選',
+    p.showNames ? '顯示投票人' : '只顯示票數',
+    p.deadline ? '截止 ' + p.deadline : '無截止時間'].join('｜');
+  $('closedBanner').style.display = p.closed ? 'block' : 'none';
+  $('tools').style.display = 'flex';
+  $('voters').textContent = '已有 ' + d.voterCount + ' 人投票';
+  $('btnClear').style.display = p.closed ? 'none' : '';
+
+  if (!keepSelection) { state.selected = new Set(d.myChoices); state.dirty = false; }
+
+  const max = Math.max(0, ...d.options.map(o => o.count));
+  const list = $('list');
+  list.className = p.multi ? 'multi' : 'single';
+  list.innerHTML = d.options.map(o => {
+    const sel = state.selected.has(o.id);
+    const pct = max ? Math.round(o.count / max * 100) : 0;
+    const names = p.showNames && o.names.length ? '<div class="names">' + o.names.map(esc).join('、') + '</div>' : '';
+    return '<div class="opt' + (sel ? ' sel' : '') + (p.closed ? ' disabled' : '') +
+      (max && o.count === max ? ' top' : '') + '" data-id="' + esc(o.id) + '">' +
+      '<div class="mark"></div><div class="info"><div class="row">' +
+      '<span class="label">' + esc(o.label) + '</span><span class="count">' + o.count + '</span></div>' +
+      '<div class="bar"><i style="width:' + pct + '%"></i></div>' + names + '</div></div>';
+  }).join('');
+  updateSubmit();
+}
+
+function updateSubmit() {
+  const p = state.data && state.data.poll;
+  const b = $('submit');
+  if (!p) { b.disabled = true; return; }
+  if (p.closed) { b.disabled = true; b.textContent = '投票已結束'; return; }
+  const n = state.selected.size;
+  const hadVote = state.data.myChoices.length > 0;
+  b.disabled = state.busy || !state.dirty;
+  b.textContent = state.busy ? '送出中…'
+    : (n === 0 ? (hadVote ? '送出（取消我的投票）' : '請選擇')
+    : (hadVote ? '更新投票（' + n + ' 項）' : '送出（已選 ' + n + ' 項）'));
+}
+
+$('list').addEventListener('click', e => {
+  const el = e.target.closest('.opt');
+  if (!el || !state.data || state.data.poll.closed) return;
+  const id = el.dataset.id;
+  if (state.data.poll.multi) {
+    state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
+  } else {
+    const had = state.selected.has(id);
+    state.selected.clear();
+    if (!had) state.selected.add(id);
+  }
+  state.dirty = true;
+  document.querySelectorAll('.opt').forEach(o => o.classList.toggle('sel', state.selected.has(o.dataset.id)));
+  updateSubmit();
+});
+
+$('btnClear').onclick = () => {
+  state.selected.clear(); state.dirty = true;
+  document.querySelectorAll('.opt').forEach(o => o.classList.remove('sel'));
+  updateSubmit();
+};
+
+$('btnRefresh').onclick = async () => {
+  try { render(await api({ action:'get' }), state.dirty); toast('已更新'); }
+  catch (e) { toast(e.message); }
+};
+
+$('submit').onclick = async () => {
+  if (state.busy) return;
+  state.busy = true; updateSubmit();
+  try {
+    const d = await api({ action:'vote', choices:[...state.selected] });
+    state.busy = false;
+    render(d, false);
+    toast(state.selected.size ? '已送出 ✓' : '已取消投票');
+  } catch (e) {
+    state.busy = false; updateSubmit();
+    toast(e.message);
+  }
+};
+
+$('close').onclick = () => {
+  if (state.dirty && !confirm('還沒送出，確定要關閉嗎？')) return;
+  liff.isInClient() ? liff.closeWindow() : window.close();
+};
+
+(async function main() {
+  try {
+    await liff.init({ liffId: LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
+    state.idToken = liff.getIDToken();
+    state.pollId = getPollId();
+    if (!state.pollId) throw new Error('缺少投票編號，請從群組裡的投票卡片開啟。');
+    render(await api({ action:'get' }), false);
+  } catch (e) {
+    showError(e.message || String(e));
+  }
+})();
+</script>
+</body>
+</html>
