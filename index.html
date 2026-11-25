@@ -110,13 +110,51 @@ function getPollId() {
   return null;
 }
 
+// ====== 登入過期時自動重新登入，並保留還沒送出的選擇 ======
+const draftKey = () => 'draft:' + state.pollId;
+function saveDraft() {
+  if (!state.data || !state.dirty) return;
+  try { localStorage.setItem(draftKey(), JSON.stringify({ t: Date.now(), choices: [...state.selected] })); } catch (e) {}
+}
+function takeDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(draftKey()));
+    localStorage.removeItem(draftKey());
+    return d && Date.now() - d.t < 10 * 60 * 1000 && Array.isArray(d.choices) ? d.choices : null;
+  } catch (e) { return null; }
+}
+function tokenExpired() {
+  try {
+    const t = liff.getDecodedIDToken();
+    return !!t && !!t.exp && t.exp * 1000 < Date.now() + 30000;
+  } catch (e) { return false; }
+}
+/** 回傳 true 代表已經開始重新登入；一分鐘內只試一次，避免一直跳轉 */
+function relogin() {
+  try {
+    if (Date.now() - Number(sessionStorage.getItem('relogin') || 0) < 60000) return false;
+    sessionStorage.setItem('relogin', String(Date.now()));
+  } catch (e) { return false; }
+  saveDraft();
+  toast('登入已過期，重新登入中…');
+  if (liff.isInClient()) {
+    location.replace('https://liff.line.me/' + LIFF_ID + '?poll=' + encodeURIComponent(state.pollId));
+  } else {
+    liff.logout();
+    liff.login({ redirectUri: location.origin + location.pathname + '?poll=' + encodeURIComponent(state.pollId) });
+  }
+  return true;
+}
+
 async function api(payload) {
+  if (tokenExpired() && relogin()) return new Promise(() => {});
   // 不設定 Content-Type，避免 CORS 預檢（Apps Script 不支援 OPTIONS）
   const res = await fetch(API_URL, {
     method:'POST',
     body: JSON.stringify(Object.assign({ idToken: state.idToken, pollId: state.pollId }, payload)),
   });
   const d = await res.json();
+  if (!d.ok && /^登入驗證失敗/.test(d.error || '') && relogin()) return new Promise(() => {});
   if (!d.ok) throw new Error(d.error || '發生錯誤');
   return d;
 }
@@ -239,7 +277,15 @@ $('close').onclick = () => {
     state.idToken = liff.getIDToken();
     state.pollId = getPollId();
     if (!state.pollId) throw new Error('缺少投票編號，請從群組裡的投票卡片開啟。');
-    render(await api({ action:'get' }), false);
+    const d = await api({ action:'get' });
+    render(d, false);
+    const draft = takeDraft();
+    if (draft && !d.poll.closed) {
+      state.selected = new Set(draft.filter(id => d.options.some(o => o.id === id)));
+      state.dirty = true;
+      render(d, true);
+      toast('已還原剛才的選擇，請再按一次送出');
+    }
   } catch (e) {
     showError(e.message || String(e));
   }
